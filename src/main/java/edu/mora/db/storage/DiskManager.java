@@ -31,6 +31,10 @@ public class DiskManager {
         return data;
     }
 
+    public int getNumPages() {
+        return nextPageId;
+    }
+
     public void close() throws IOException {
         file.close();
     }
