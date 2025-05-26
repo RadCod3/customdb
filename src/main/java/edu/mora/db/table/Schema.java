@@ -5,6 +5,7 @@ import java.util.List;
 public class Schema {
     private final List<String> columnNames;
     private final List<Type> columnTypes;
+
     public Schema(List<String> names, List<Type> types) {
         if (names.size() != types.size())
             throw new IllegalArgumentException("Names/types length mismatch");
@@ -22,6 +23,14 @@ public class Schema {
 
     public Type getColumnType(int i) {
         return columnTypes.get(i);
+    }
+
+    public int getColumnIndex(String columnName) {
+        int idx = columnNames.indexOf(columnName);
+        if (idx < 0) {
+            throw new IllegalArgumentException("Unknown column: " + columnName);
+        }
+        return idx;
     }
 
     public enum Type {INT, STRING}

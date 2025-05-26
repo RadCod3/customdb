@@ -20,5 +20,5 @@ test {
 }
 
 application {
-    mainClass = 'edu.mora.db.engine.Main'
+    mainClass = 'edu.mora.db.engine.CLI'
 }
