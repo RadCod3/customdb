@@ -15,13 +15,25 @@ public class SQLParser {
                 : s;
     }
 
+    private static String stripLeadingComments(String s) {
+        String sql = s.trim();
+        while (sql.startsWith("/*")) {
+            int end = sql.indexOf("*/");
+            if (end < 0)           // malformed comment → bail out
+                break;
+            sql = sql.substring(end + 2).trim();
+        }
+        return sql;
+    }
+
     private static String stripSemi(String s) {
         return s.endsWith(";") ? s.substring(0, s.length() - 1).trim() : s;
     }
 
     public Statement parse(String sql) {
-        sql = sql.trim();
+        sql = stripLeadingComments(sql);
         String upperSql = sql.toUpperCase();
+
         if (upperSql.startsWith("CREATE")) return parseCreate(sql);
         if (upperSql.startsWith("INSERT")) return parseInsert(sql);
         if (upperSql.startsWith("SELECT")) return parseSelect(sql);

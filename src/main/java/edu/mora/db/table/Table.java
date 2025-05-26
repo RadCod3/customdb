@@ -47,7 +47,7 @@ public class Table {
     /* ─────────────────── INSERT ─────────────────────────────────── */
     public RecordId insertTuple(long tx, TransactionManager tm, Tuple t) throws IOException {
         byte[] rec = t.serialize();
-        if (rec.length > capacityPerPage - BYTES)
+        if (rec.length > capacityPerPage - 2 * BYTES)
             throw new IllegalArgumentException("Tuple too large");
 
         if (pageIds.isEmpty()) allocateFreshPage();
@@ -180,20 +180,28 @@ public class Table {
         for (int pid : pageIds) {
             Page p = bufPool.getPage(pid);
             ByteBuffer data = ByteBuffer.wrap(p.getData());
+
             int numSlots = data.getInt(0);
             int used = HEADER_SIZE;
+
             for (int j = 0; j < numSlots; j++) {
                 int slotPos = Page.PAGE_SIZE - BYTES * (j + 1);
-                used += BYTES + data.getInt(data.getInt(slotPos));
+                used += BYTES                    // length-prefix of tuple
+                        + data.getInt(data.getInt(slotPos));  // tuple body
             }
+
+            /* free space in front of current slot directory */
             int slotDirStart = Page.PAGE_SIZE - BYTES * numSlots;
             int free = slotDirStart - used;
-            if (free >= recLen + BYTES) return pid;
+
+            /*  ⟹  record  = (length-field + body)  +  1 new slot pointer  */
+            if (free >= recLen + 2 * BYTES)      //  <<<  FIX: +BYTES
+                return pid;
         }
-        /* all full: allocate another and try again */
         allocateFreshPage();
         return pageIds.getLast();
     }
+
 
     /**
      * Writes the record into the page and returns its offset.
