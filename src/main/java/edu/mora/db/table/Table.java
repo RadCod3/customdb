@@ -1,194 +1,197 @@
 package edu.mora.db.table;
 
-import edu.mora.db.storage.BufferPool;
-import edu.mora.db.storage.DiskManager;
-import edu.mora.db.storage.Page;
-import edu.mora.db.storage.RecordId;
+import edu.mora.db.catalog.Catalog;
+import edu.mora.db.storage.*;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.function.Predicate;
 
 import static java.lang.Integer.BYTES;
 
 /**
- * A heap-file table: fixed-length records with a slot directory at the end of each page. Supports insert, read, delete,
- * update, and scan operations.
+ * A heap-file table that logs every page update through the TransactionManager.
  */
 public class Table {
-    public static final int HEADER_SIZE = BYTES; // slot count prefix size
+
+    public static final int HEADER_SIZE = BYTES;                 // slot-count prefix
+    private final String name;
     private final Schema schema;
     private final BufferPool bufPool;
     private final DiskManager disk;
+    private final Catalog catalog;
     private final int capacityPerPage;
 
-    public Table(Schema schema, BufferPool bufPool, DiskManager disk) {
+    private final List<Integer> pageIds;
+
+    public Table(String name, Schema schema,
+                 BufferPool pool, DiskManager disk,
+                 Catalog catalog,
+                 List<Integer> existingPages) {
+        this.name = name;
         this.schema = schema;
-        this.bufPool = bufPool;
+        this.bufPool = pool;
         this.disk = disk;
+        this.catalog = catalog;
         this.capacityPerPage = Page.PAGE_SIZE - HEADER_SIZE;
+        this.pageIds = new ArrayList<>(existingPages);
     }
 
-    public RecordId insertTuple(Tuple t) throws IOException {
+    public Table(String name, Schema schema,
+                 BufferPool pool, DiskManager disk,
+                 Catalog catalog) {
+        this(name, schema, pool, disk, catalog, Collections.emptyList());
+    }
+
+
+    /* ─────────────────── INSERT ─────────────────────────────────── */
+    public RecordId insertTuple(long tx, TransactionManager tm, Tuple t) throws IOException {
         byte[] rec = t.serialize();
         if (rec.length > capacityPerPage - BYTES)
             throw new IllegalArgumentException("Tuple too large");
 
+        if (pageIds.isEmpty()) allocateFreshPage();
         int pid = findPageWithSpace(rec.length);
         Page p = bufPool.getPage(pid);
-        ByteBuffer data = ByteBuffer.wrap(p.getData());
+        byte[] before = p.getData().clone();
 
-        int numSlots = data.getInt(0);
-        int recOffset = HEADER_SIZE;
-        for (int i = 0; i < numSlots; i++) {
-            int slotPos = Page.PAGE_SIZE - BYTES * (i + 1);
-            int off = data.getInt(slotPos);
-            int len = data.getInt(off);
-            recOffset += BYTES + len;
-        }
+        int offset = writeRecordIntoPage(p, rec);
+        byte[] after = p.getData().clone();
 
-        // write length prefix + record bytes
-        data.putInt(recOffset, rec.length);
-        System.arraycopy(rec, 0, p.getData(), recOffset + BYTES, rec.length);
-
-        // add slot
-        int newSlotPos = Page.PAGE_SIZE - BYTES * (numSlots + 1);
-        data.putInt(newSlotPos, recOffset);
-        data.putInt(0, numSlots + 1);
-
-        bufPool.markDirty(pid, true);
-        return new RecordId(pid, recOffset);
+        tm.recordPageUpdate(tx, pid, before, after);
+        return new RecordId(pid, offset);
     }
 
+    /* ─────────────────── UPDATE ─────────────────────────────────── */
+    public RecordId updateTuple(long tx, TransactionManager tm, RecordId rid, Tuple newT) throws IOException {
+        byte[] rec = newT.serialize();
+        Page p = bufPool.getPage(rid.getPageId());
+        byte[] before = p.getData().clone();
+
+        ByteBuffer data = ByteBuffer.wrap(p.getData());
+        int oldLen = data.getInt(rid.getOffset());
+        if (oldLen <= 0) throw new IllegalStateException("Cannot update deleted tuple");
+
+        RecordId result;
+        if (rec.length <= oldLen) {
+            data.putInt(rid.getOffset(), rec.length);
+            System.arraycopy(rec, 0, p.getData(), rid.getOffset() + BYTES, rec.length);
+            result = rid;
+        } else {
+            data.putInt(rid.getOffset(), 0);                    // tombstone
+            result = insertTuple(tx, tm, newT);                 // inserts logs itself
+        }
+
+        byte[] after = p.getData().clone();
+        tm.recordPageUpdate(tx, rid.getPageId(), before, after);
+        return result;
+    }
+
+    /* ─────────────────── DELETE ─────────────────────────────────── */
+    public void deleteTuple(long tx, TransactionManager tm, RecordId rid) throws IOException {
+        Page p = bufPool.getPage(rid.getPageId());
+        byte[] before = p.getData().clone();
+
+        ByteBuffer data = ByteBuffer.wrap(p.getData());
+        data.putInt(rid.getOffset(), 0);
+
+        byte[] after = p.getData().clone();
+        tm.recordPageUpdate(tx, rid.getPageId(), before, after);
+    }
+
+    /* ─────────────────── READ / SCAN (unchanged) ────────────────── */
     public Tuple readTuple(RecordId rid) throws IOException {
         Page p = bufPool.getPage(rid.getPageId());
         ByteBuffer data = ByteBuffer.wrap(p.getData());
-
-        int offset = rid.getOffset();
-        int len = data.getInt(offset);
-        if (len <= 0) throw new IllegalStateException("Cannot read deleted tuple");
+        int len = data.getInt(rid.getOffset());
+        if (len <= 0) throw new IllegalStateException("Deleted tuple");
 
         byte[] rec = new byte[len];
-        System.arraycopy(p.getData(), offset + BYTES, rec, 0, len);
+        System.arraycopy(p.getData(), rid.getOffset() + BYTES, rec, 0, len);
         return Tuple.deserialize(schema, rec);
     }
 
-    // private helpers
+    public List<Tuple> scan(Predicate<Tuple> pred) throws IOException {
+        List<Tuple> out = new ArrayList<>();
+        for (int pid : pageIds) {
+            Page p = bufPool.getPage(pid);
+            ByteBuffer data = ByteBuffer.wrap(p.getData());
+            int slots = data.getInt(0);
+            for (int i = 0; i < slots; i++) {
+                int slotPos = Page.PAGE_SIZE - BYTES * (i + 1);
+                int off = data.getInt(slotPos);
+                int len = data.getInt(off);
+                if (len <= 0) continue;
+                byte[] rec = new byte[len];
+                System.arraycopy(p.getData(), off + BYTES, rec, 0, len);
+                Tuple t = Tuple.deserialize(schema, rec);
+                if (pred.test(t)) out.add(t);
+            }
+        }
+        return out;
+    }
+
+    public List<Tuple> scanAll() throws IOException {
+        return scan(t -> true);
+    }
+
+    public Schema getSchema() {
+        return schema;
+    }
+
+    /**
+     * Allocates a brand-new page, records ownership in catalog.
+     */
+    private void allocateFreshPage() throws IOException {
+        int pid = disk.allocatePage();
+        pageIds.add(pid);
+
+        /* the page is all-zero (slotCount = 0) already – nothing else to do */
+        catalog.registerPage(name, pid);               // persist
+    }
+
+    /* ─────────────────── helpers ─────────────────────────────────── */
     private int findPageWithSpace(int recLen) throws IOException {
-        int total = disk.getNumPages();
-        for (int i = 0; i < total; i++) {
-            Page p = bufPool.getPage(i);
+        for (int pid : pageIds) {
+            Page p = bufPool.getPage(pid);
             ByteBuffer data = ByteBuffer.wrap(p.getData());
             int numSlots = data.getInt(0);
             int used = HEADER_SIZE;
             for (int j = 0; j < numSlots; j++) {
                 int slotPos = Page.PAGE_SIZE - BYTES * (j + 1);
-                int off = data.getInt(slotPos);
-                int len = data.getInt(off);
-                used += BYTES + len;
+                used += BYTES + data.getInt(data.getInt(slotPos));
             }
             int slotDirStart = Page.PAGE_SIZE - BYTES * numSlots;
             int free = slotDirStart - used;
-            if (free >= recLen + BYTES) {
-                return i;
-            }
+            if (free >= recLen + BYTES) return pid;
         }
-        return disk.allocatePage();
+        /* all full: allocate another and try again */
+        allocateFreshPage();
+        return pageIds.getLast();
     }
 
     /**
-     * Marks the tuple at rid as deleted (tombstone) by zeroing its length prefix.
+     * Writes the record into the page and returns its offset.
      */
-    public void deleteTuple(RecordId rid) throws IOException {
-        Page p = bufPool.getPage(rid.getPageId());
+    private int writeRecordIntoPage(Page p, byte[] rec) {
         ByteBuffer data = ByteBuffer.wrap(p.getData());
-        data.putInt(rid.getOffset(), 0);
-        bufPool.markDirty(rid.getPageId(), true);
-    }
-
-    /**
-     * Updates the tuple at rid. If new record fits in old space, overwrite in place;
-     * otherwise tombstone the old and insert the new record elsewhere.
-     * @return the RecordId of the updated tuple (old or new slot).
-     */
-    public RecordId updateTuple(RecordId rid, Tuple newT) throws IOException {
-        byte[] rec = newT.serialize();
-        Page p = bufPool.getPage(rid.getPageId());
-        ByteBuffer data = ByteBuffer.wrap(p.getData());
-        int offset = rid.getOffset();
-
-        int oldLen = data.getInt(offset);
-        if (oldLen <= 0) throw new IllegalStateException("Cannot update deleted tuple");
-
-        if (rec.length <= oldLen) {
-            data.putInt(offset, rec.length);
-            System.arraycopy(rec, 0, p.getData(), offset + BYTES, rec.length);
-            bufPool.markDirty(rid.getPageId(), true);
-            return rid;
-        } else {
-            data.putInt(offset, 0);
-            bufPool.markDirty(rid.getPageId(), true);
-            return insertTuple(newT);
+        int slots = data.getInt(0);
+        int offset = HEADER_SIZE;
+        for (int i = 0; i < slots; i++) {
+            int slotPos = Page.PAGE_SIZE - BYTES * (i + 1);
+            int off = data.getInt(slotPos);
+            offset += BYTES + data.getInt(off);
         }
-    }
-
-    /**
-     * Scans all tuples in the table, returning those matching the predicate. Deleted tuples (tombstones) are skipped.
-     */
-    public List<Tuple> scan(Predicate<Tuple> pred) throws IOException {
-        List<Tuple> results = new ArrayList<>();
-        int numPages = disk.getNumPages();
-        for (int pid = 0; pid < numPages; pid++) {
-            Page p = bufPool.getPage(pid);
-            ByteBuffer data = ByteBuffer.wrap(p.getData());
-            int numSlots = data.getInt(0);
-            for (int i = 0; i < numSlots; i++) {
-                int slotPos = Page.PAGE_SIZE - BYTES * (i + 1);
-                int offset = data.getInt(slotPos);
-                int len = data.getInt(offset);
-                if (len <= 0) continue;
-                byte[] rec = new byte[len];
-                System.arraycopy(p.getData(), offset + BYTES, rec, 0, len);
-                Tuple t = Tuple.deserialize(schema, rec);
-                if (pred.test(t)) results.add(t);
-            }
-        }
-        return results;
-    }
-
-    /**
-     * Convenience: return all tuples.
-     */
-    public List<Tuple> scanAll() throws IOException {
-        return scan(t -> true);
-    }
-
-    /**
-     * Expose schema for querying.
-     */
-    public Schema getSchema() {
-        return schema;
-    }
-
-    public BufferPool getBufferPool() {
-        return bufPool;
-    }
-
-    public DiskManager getDiskManager() {
-        return disk;
-    }
-
-
-    private int slotPayloadSize(Page p, int numSlots) {
-        ByteBuffer data = ByteBuffer.wrap(p.getData());
-        int sum = 0;
-        for (int i = 0; i < numSlots; i++) {
-            int off = data.getInt(Page.PAGE_SIZE - BYTES * (i + 1));
-            int len = data.getInt(off);
-            sum += len;
-        }
-        return sum;
+        /* record (len + body) */
+        data.putInt(offset, rec.length);
+        System.arraycopy(rec, 0, p.getData(), offset + BYTES, rec.length);
+        /* slot entry */
+        int slotPos = Page.PAGE_SIZE - BYTES * (slots + 1);
+        data.putInt(slotPos, offset);
+        data.putInt(0, slots + 1);
+        return offset;
     }
 }

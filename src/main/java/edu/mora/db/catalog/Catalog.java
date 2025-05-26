@@ -9,90 +9,118 @@ import java.io.*;
 import java.util.*;
 
 /**
- * A simple catalog that persists table schemas on disk and allows lookup by name. Catalog file format (catalog.meta):
- * int    numTables for each table: UTF   tableName int   numColumns for each column: UTF name int typeOrdinal
+ * Catalog now also remembers which pages belong to each table, so that scans work correctly after a crash/restart.
+ * <p>
+ * catalog.meta layout ------------------- int    nextTableId int    tableCount REPEAT tableCount { UTF
+ * tableName int         tableId int         colCount REPEAT colCount { UTF colName, int colTypeOrdinal } int
+ * pageCount REPEAT pageCount { int pageId } }
  */
 public class Catalog {
+
     private static final String CATALOG_FILE = "catalog.meta";
 
     private final File metaFile;
-    private final DiskManager diskManager;
-    private final BufferPool bufferPool;
+    private final DiskManager disk;
+    private final BufferPool pool;
+
     private final Map<String, Schema> schemas = new LinkedHashMap<>();
+    private final Map<String, Integer> tableIds = new LinkedHashMap<>();
+    private final Map<String, List<Integer>> pages = new LinkedHashMap<>();
     private final Map<String, Table> tables = new LinkedHashMap<>();
 
-    /**
-     * Initialize catalog in the given directory. Loads existing metadata if present.
-     */
-    public Catalog(String dbPath, BufferPool bufferPool) throws IOException {
-        this.bufferPool = bufferPool;
-        this.diskManager = new DiskManager(dbPath);
-        this.metaFile = new File(dbPath, CATALOG_FILE);
-        if (metaFile.exists()) {
-            load();
-        } else {
-            save();
-        }
+    private int nextTableId = 1;
+
+    /* ------------------------------------------------------------ */
+    public Catalog(String dir, BufferPool pool) throws IOException {
+        this.disk = new DiskManager(dir);
+        this.pool = pool;
+        this.metaFile = new File(dir, CATALOG_FILE);
+
+        if (metaFile.exists()) load();
+        else save();     // bootstrap
+    }
+
+    /* ------------------------------------------------------------ */
+    public synchronized void createTable(String name, Schema schema) throws IOException {
+        if (schemas.containsKey(name))
+            throw new IllegalArgumentException("Table '" + name + "' already exists");
+
+        int id = nextTableId++;
+        schemas.put(name, schema);
+        tableIds.put(name, id);
+        pages.put(name, new ArrayList<>());             // empty list
+        tables.put(name, new Table(name, schema, pool, disk, this)); // 👉 passes catalog
+
+        save();                                         // durable DDL
     }
 
     /**
-     * Create a new table with the given name and schema. Persists metadata immediately.
+     * Called by Table when it allocates a new page.
      */
-    public void createTable(String tableName, Schema schema) throws IOException {
-        if (schemas.containsKey(tableName)) {
-            throw new IllegalArgumentException("Table '" + tableName + "' already exists");
-        }
-        schemas.put(tableName, schema);
-        tables.put(tableName, new Table(schema, bufferPool, diskManager));
-        save();
+    public synchronized void registerPage(String tableName, int pageId) throws IOException {
+        pages.get(tableName).add(pageId);
+        save();                                         // flush meta incrementally
     }
 
-    /**
-     * Get the Table instance for the given name, or null if not found.
-     */
-    public Table getTable(String tableName) {
-        return tables.get(tableName);
+    public Table getTable(String name) {
+        return tables.get(name);
     }
 
-    /**
-     * List all table names in this catalog.
-     */
     public Set<String> listTables() {
         return Collections.unmodifiableSet(schemas.keySet());
     }
 
+    /* ------------------------------------------------------------ */
     private void save() throws IOException {
         try (DataOutputStream out = new DataOutputStream(new FileOutputStream(metaFile))) {
+            out.writeInt(nextTableId);
             out.writeInt(schemas.size());
-            for (Map.Entry<String, Schema> e : schemas.entrySet()) {
-                out.writeUTF(e.getKey());
-                Schema s = e.getValue();
-                int cols = s.numColumns();
-                out.writeInt(cols);
-                for (int i = 0; i < cols; i++) {
+
+            for (String name : schemas.keySet()) {
+                Schema s = schemas.get(name);
+                out.writeUTF(name);
+                out.writeInt(tableIds.get(name));
+
+                out.writeInt(s.numColumns());
+                for (int i = 0; i < s.numColumns(); i++) {
                     out.writeUTF(s.getColumnName(i));
                     out.writeInt(s.getColumnType(i).ordinal());
                 }
+
+                List<Integer> plist = pages.get(name);
+                out.writeInt(plist.size());
+                for (int pid : plist) out.writeInt(pid);
             }
         }
     }
 
     private void load() throws IOException {
         try (DataInputStream in = new DataInputStream(new FileInputStream(metaFile))) {
-            int tablesCount = in.readInt();
-            for (int t = 0; t < tablesCount; t++) {
+
+            nextTableId = in.readInt();
+            int tblCnt = in.readInt();
+
+            for (int t = 0; t < tblCnt; t++) {
                 String name = in.readUTF();
-                int cols = in.readInt();
-                List<String> colNames = new ArrayList<>(cols);
-                List<Schema.Type> colTypes = new ArrayList<>(cols);
-                for (int i = 0; i < cols; i++) {
+                int tblId = in.readInt();
+
+                int colCnt = in.readInt();
+                List<String> colNames = new ArrayList<>(colCnt);
+                List<Schema.Type> colTypes = new ArrayList<>(colCnt);
+                for (int c = 0; c < colCnt; c++) {
                     colNames.add(in.readUTF());
-                    int ord = in.readInt();
-                    colTypes.add(Schema.Type.values()[ord]);
+                    colTypes.add(Schema.Type.values()[in.readInt()]);
                 }
                 Schema schema = new Schema(colNames, colTypes);
                 schemas.put(name, schema);
-                tables.put(name, new Table(schema, bufferPool, diskManager));
+                tableIds.put(name, tblId);
+
+                int pageCnt = in.readInt();
+                List<Integer> plist = new ArrayList<>(pageCnt);
+                for (int i = 0; i < pageCnt; i++) plist.add(in.readInt());
+                pages.put(name, plist);
+
+                tables.put(name, new Table(name, schema, pool, disk, this, plist));
             }
         }
     }

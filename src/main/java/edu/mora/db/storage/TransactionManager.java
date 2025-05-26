@@ -6,99 +6,77 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.Consumer;
 
 /**
- * Manages transactions: begin, update, commit, and rollback. Uses WALManager for logging durability and BufferPool for
- * page caching.
+ * Very small transaction manager: each statement = one TX. All updates come in already applied; we just log and
+ * remember before-images in case of rollback.
  */
 public class TransactionManager {
+
     private final AtomicLong nextTxId = new AtomicLong(1);
     private final WALManager wal;
-    private final BufferPool bufferPool;
-    private final DiskManager diskManager;
-    // Track per-transaction before-images for rollback
-    private final Map<Long, List<UpdateRecord>> txUpdates = new ConcurrentHashMap<>();
+    private final BufferPool pool;
+    private final DiskManager disk;
 
-    public TransactionManager(WALManager wal, BufferPool bufferPool, DiskManager diskManager) {
+    private final Map<Long, List<UpdateRecord>> updates = new ConcurrentHashMap<>();
+
+    public TransactionManager(WALManager wal, BufferPool pool, DiskManager disk) {
         this.wal = wal;
-        this.bufferPool = bufferPool;
-        this.diskManager = diskManager;
+        this.pool = pool;
+        this.disk = disk;
     }
 
-    /**
-     * Start a new transaction, returns its unique ID.
-     */
+    /* ───────────────────────────────────────────── */
     public long begin() throws IOException {
-        long txId = nextTxId.getAndIncrement();
-        wal.logBegin(txId);
-        txUpdates.put(txId, new ArrayList<>());
-        return txId;
+        long id = nextTxId.getAndIncrement();
+        wal.logBegin(id);
+        updates.put(id, new ArrayList<>());
+        return id;
     }
 
     /**
-     * Update a page within the context of a transaction. - Loads page into buffer, captures before-image, - Applies
-     * updater, captures after-image, - Logs the update, marks page dirty.
+     * Called by Table AFTER it has modified the page in memory.
      */
-    public void updatePage(long txId, int pageId, Consumer<Page> updater) throws IOException {
-        // Load page
-        Page p = bufferPool.getPage(pageId);
-        // Capture before-image
-        byte[] before = p.getData().clone();
-        // Apply user-provided modification
-        updater.accept(p);
-        // Capture after-image
-        byte[] after = p.getData().clone();
-
-        // Log update and mark dirty
+    public void recordPageUpdate(long txId, int pageId,
+                                 byte[] before, byte[] after) throws IOException {
         wal.logUpdate(txId, pageId, before, after);
-        bufferPool.markDirty(pageId, true);
-
-        // Remember before-image to allow rollback
-        txUpdates.get(txId).add(new UpdateRecord(pageId, before));
+        wal.flush();                           // write-ahead rule
+        pool.markDirty(pageId, true);          // page is already dirty
+        updates.get(txId).add(new UpdateRecord(pageId, before));
     }
 
-    /**
-     * Commit a transaction: log commit, flush all dirty pages to disk.
-     */
     public void commit(long txId) throws IOException {
         wal.logCommit(txId);
-        bufferPool.flushAll();
-        txUpdates.remove(txId);
+        wal.flush();
+        pool.flushAll();
+        updates.remove(txId);
     }
 
-    /**
-     * Abort a transaction: log abort, undo all buffered changes, and flush.
-     */
     public void rollback(long txId) throws IOException {
         wal.logAbort(txId);
-        List<UpdateRecord> updates = txUpdates.get(txId);
-        if (updates != null) {
-            // Undo in reverse order
-            for (int i = updates.size() - 1; i >= 0; i--) {
-                UpdateRecord rec = updates.get(i);
-                // Restore before-image in buffer
-                Page p = bufferPool.getPage(rec.pageId);
-                System.arraycopy(rec.before, 0, p.getData(), 0, Page.PAGE_SIZE);
-                bufferPool.markDirty(rec.pageId, true);
-                // Also write immediately to disk to maintain consistency
-                diskManager.writePage(rec.pageId, rec.before);
+        List<UpdateRecord> list = updates.get(txId);
+        if (list != null) {
+            for (int i = list.size() - 1; i >= 0; i--) {
+                UpdateRecord r = list.get(i);
+                // restore before-image both in buffer and on disk
+                Page p = pool.getPage(r.pageId);
+                System.arraycopy(r.before, 0, p.getData(), 0, Page.PAGE_SIZE);
+                pool.markDirty(r.pageId, true);
+                disk.writePage(r.pageId, r.before);
             }
-            bufferPool.flushAll();
-            txUpdates.remove(txId);
+            pool.flushAll();
+            updates.remove(txId);
         }
     }
 
-    /**
-     * Simple record of a page update's before-image.
-     */
+    /* ───────────────────────────────────────────── */
     private static class UpdateRecord {
         final int pageId;
         final byte[] before;
 
-        UpdateRecord(int pageId, byte[] before) {
-            this.pageId = pageId;
-            this.before = before;
+        UpdateRecord(int pid, byte[] img) {
+            this.pageId = pid;
+            this.before = img;
         }
     }
 }

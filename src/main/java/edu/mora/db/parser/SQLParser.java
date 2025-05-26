@@ -1,8 +1,10 @@
 package edu.mora.db.parser;
 
+import edu.mora.db.sql.CreateTableStatement;
 import edu.mora.db.sql.InsertStatement;
 import edu.mora.db.sql.SelectStatement;
 import edu.mora.db.sql.Statement;
+import edu.mora.db.table.Schema;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -15,10 +17,31 @@ public class SQLParser {
     public Statement parse(String sql) {
         sql = sql.trim();
         String upperSql = sql.toUpperCase();
+        if (upperSql.startsWith("CREATE")) return parseCreate(sql);
         if (upperSql.startsWith("INSERT")) return parseInsert(sql);
         if (upperSql.startsWith("SELECT")) return parseSelect(sql);
         throw new IllegalArgumentException("Unsupported SQL: " + sql);
     }
+
+    private CreateTableStatement parseCreate(String sql) {
+        // CREATE TABLE tableName (col1 TYPE, col2 TYPE, ...)
+        String remainder = sql.substring("CREATE TABLE".length()).trim();
+        int parenOpen = remainder.indexOf('(');
+        String tableName = remainder.substring(0, parenOpen).trim();
+        String colsList = remainder.substring(parenOpen + 1, remainder.lastIndexOf(')')).trim();
+
+        String[] colDefs = colsList.split(",");
+        List<String> colNames = new ArrayList<>();
+        List<Schema.Type> colTypes = new ArrayList<>();
+        for (String def : colDefs) {
+            String[] parts = def.trim().split("\\s+");
+            colNames.add(parts[0]);
+            String typeStr = parts[1].toUpperCase();
+            colTypes.add(Schema.Type.valueOf(typeStr));
+        }
+        return new CreateTableStatement(tableName, colNames, colTypes);
+    }
+
 
     private InsertStatement parseInsert(String sql) {
         // INSERT INTO tableName VALUES (v1, v2, ...)

@@ -41,7 +41,7 @@ public class Tuple {
         for (int i = 0; i < schema.numColumns(); i++) {
             switch (schema.getColumnType(i)) {
                 case INT:
-                    buf.putInt((Integer) values[i]);
+                    buf.putInt(Integer.parseInt(values[i].toString()));
                     break;
                 case STRING:
                     byte[] s = ((String) values[i]).getBytes();
@@ -58,5 +58,17 @@ public class Tuple {
 
     public Object getField(int i) {
         return values[i];
+    }
+
+    @Override
+    public String toString() {
+        StringBuilder sb = new StringBuilder();
+        sb.append('(');
+        for (int i = 0; i < schema.numColumns(); i++) {
+            if (i > 0) sb.append(", ");
+            sb.append(values[i]);
+        }
+        sb.append(')');
+        return sb.toString();
     }
 }

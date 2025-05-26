@@ -9,56 +9,60 @@ import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-public class TransactionManagerTest {
+/**
+ * Verifies that TransactionManager’s commit / rollback logic really makes it to disk and survives a restart.
+ */
+class TransactionManagerTest {
+
     @TempDir
     Path tempDir;
 
-    private DiskManager diskManager;
-    private BufferPool bufferPool;
-    private WALManager walManager;
-    private TransactionManager txManager;
+    private DiskManager disk;
+    private BufferPool pool;
+    private WALManager wal;
+    private TransactionManager tm;
 
     @BeforeEach
-    void setup() throws IOException {
-        diskManager = new DiskManager(tempDir.toString());
-        bufferPool = new BufferPool(5, diskManager);
-        walManager = new WALManager(tempDir.toString());
-        txManager = new TransactionManager(walManager, bufferPool, diskManager);
+    void init() throws IOException {
+        disk = new DiskManager(tempDir.toString());
+        pool = new BufferPool(4, disk);
+        wal = new WALManager(tempDir.toString());
+        tm = new TransactionManager(wal, pool, disk);
     }
 
     @Test
-    void testCommitPersistsChangesThroughRecovery() throws IOException {
-        int pageId = diskManager.allocatePage();
-        // initial content should be zeros
-        byte[] original = diskManager.readPage(pageId);
-        assertEquals(0, original[0]);
+    void commitPersistsAfterRecovery() throws IOException {
+        int pid = disk.allocatePage();
+        Page p = pool.getPage(pid);
 
-        // begin and apply update
-        long txId = txManager.begin();
-        txManager.updatePage(txId, pageId, p -> p.getData()[0] = 55);
-        txManager.commit(txId);
+        long tx = tm.begin();
+        byte[] before = p.getData().clone();
+        p.getData()[0] = 55;
+        byte[] after = p.getData().clone();
+        tm.recordPageUpdate(tx, pid, before, after);
+        tm.commit(tx);
 
-        // simulate restart
-        DiskManager dm2 = new DiskManager(tempDir.toString());
-        BufferPool bp2 = new BufferPool(5, dm2);
-        WALManager wal2 = new WALManager(tempDir.toString());
-        wal2.recover(bp2, dm2);
+        /* restart */
+        DiskManager d2 = new DiskManager(tempDir.toString());
+        BufferPool b2 = new BufferPool(4, d2);
+        WALManager w2 = new WALManager(tempDir.toString());
+        w2.recover(b2, d2);
 
-        byte[] afterRecovery = dm2.readPage(pageId);
-        assertEquals(55, afterRecovery[0]);
+        assertEquals(55, d2.readPage(pid)[0]);
     }
 
     @Test
-    void testRollbackRevertsChanges() throws IOException {
-        int pageId = diskManager.allocatePage();
-        byte[] original = diskManager.readPage(pageId);
-        assertEquals(0, original[0]);
+    void rollbackRestoresBeforeImage() throws IOException {
+        int pid = disk.allocatePage();
+        Page p = pool.getPage(pid);
 
-        long txId = txManager.begin();
-        txManager.updatePage(txId, pageId, p -> p.getData()[0] = 77);
-        txManager.rollback(txId);
+        long tx = tm.begin();
+        byte[] before = p.getData().clone();
+        p.getData()[0] = 77;
+        byte[] after = p.getData().clone();
+        tm.recordPageUpdate(tx, pid, before, after);
+        tm.rollback(tx);
 
-        byte[] afterRollback = diskManager.readPage(pageId);
-        assertEquals(0, afterRollback[0]);
+        assertEquals(0, disk.readPage(pid)[0], "byte should be back to original value");
     }
 }
