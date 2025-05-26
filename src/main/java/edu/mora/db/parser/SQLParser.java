@@ -1,25 +1,32 @@
 package edu.mora.db.parser;
 
-import edu.mora.db.sql.CreateTableStatement;
-import edu.mora.db.sql.InsertStatement;
-import edu.mora.db.sql.SelectStatement;
-import edu.mora.db.sql.Statement;
+import edu.mora.db.sql.*;
 import edu.mora.db.table.Schema;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Optional;
+import java.util.*;
 
 /**
  * Very simple SQL parser for INSERT and SELECT.
  */
 public class SQLParser {
+    private static String stripQuotes(String s) {
+        return (s.startsWith("'") && s.endsWith("'"))
+                ? s.substring(1, s.length() - 1)
+                : s;
+    }
+
+    private static String stripSemi(String s) {
+        return s.endsWith(";") ? s.substring(0, s.length() - 1).trim() : s;
+    }
+
     public Statement parse(String sql) {
         sql = sql.trim();
         String upperSql = sql.toUpperCase();
         if (upperSql.startsWith("CREATE")) return parseCreate(sql);
         if (upperSql.startsWith("INSERT")) return parseInsert(sql);
         if (upperSql.startsWith("SELECT")) return parseSelect(sql);
+        if (upperSql.startsWith("UPDATE")) return parseUpdate(sql);
+        if (upperSql.startsWith("DELETE")) return parseDelete(sql);
         throw new IllegalArgumentException("Unsupported SQL: " + sql);
     }
 
@@ -42,7 +49,6 @@ public class SQLParser {
         return new CreateTableStatement(tableName, colNames, colTypes);
     }
 
-
     private InsertStatement parseInsert(String sql) {
         // INSERT INTO tableName VALUES (v1, v2, ...)
         String upperSql = sql.toUpperCase();
@@ -50,7 +56,7 @@ public class SQLParser {
         String head = sql.substring(0, valuesIdx).trim();           // INSERT INTO tableName
         String tail = sql.substring(valuesIdx + "VALUES".length()).trim(); // (v1, v2, ...)
 
-        String[] headTokens = head.split("\s+");
+        String[] headTokens = head.split("\\s+");
         String tableName = headTokens[2];
 
         String valuesList = tail.substring(tail.indexOf('(') + 1, tail.lastIndexOf(')'));
@@ -93,4 +99,57 @@ public class SQLParser {
 
         return new SelectStatement(tableName, cond);
     }
+
+    private UpdateStatement parseUpdate(String sql) {
+        String up = sql.toUpperCase();
+
+        int setIdx = up.indexOf(" SET ");
+        int whereIdx = up.indexOf(" WHERE ");
+
+        String tbl = sql.substring("UPDATE".length(), setIdx).trim();
+
+        String assignPart = (whereIdx < 0)
+                ? sql.substring(setIdx + 4).trim()
+                : sql.substring(setIdx + 4, whereIdx).trim();
+
+        Map<String, String> assigns = new LinkedHashMap<>();
+        for (String pair : assignPart.split(",")) {
+            String[] kv = pair.split("=", 2);
+            assigns.put(kv[0].trim(), stripQuotes(kv[1].trim()));
+        }
+
+        Optional<SelectStatement.Condition> cond = Optional.empty();
+        if (whereIdx >= 0) {
+            String afterWhere = sql.substring(whereIdx + 6).trim();
+            String[] kv = afterWhere.split("=", 2);
+            cond = Optional.of(new SelectStatement.Condition(
+                    kv[0].trim(),
+                    stripQuotes(stripSemi(kv[1].trim()))));
+        }
+        return new UpdateStatement(tbl, assigns, cond);
+    }
+
+    private DeleteStatement parseDelete(String sql) {
+        // DELETE FROM tbl [WHERE col = val]
+        String up = sql.toUpperCase(Locale.ROOT);
+
+        int fromIdx = up.indexOf("FROM");
+        int whereIdx = up.indexOf("WHERE");
+
+        String tbl = sql.substring(fromIdx + "FROM".length(),
+                                   whereIdx >= 0 ? whereIdx : sql.length())
+                .trim();
+
+        Optional<SelectStatement.Condition> cond = Optional.empty();
+        if (whereIdx >= 0) {
+            String afterWhere = sql.substring(whereIdx + "WHERE".length()).trim();
+            String[] kv = afterWhere.split("=", 2);
+            cond = Optional.of(new SelectStatement.Condition(
+                    kv[0].trim(),
+                    stripQuotes(stripSemi(kv[1].trim()))));
+        }
+        return new DeleteStatement(tbl, cond);
+    }
+
+
 }

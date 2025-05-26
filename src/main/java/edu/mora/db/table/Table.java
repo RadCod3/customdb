@@ -16,7 +16,6 @@ import static java.lang.Integer.BYTES;
  * A heap-file table that logs every page update through the TransactionManager.
  */
 public class Table {
-
     public static final int HEADER_SIZE = BYTES;                 // slot-count prefix
     private final String name;
     private final Schema schema;
@@ -24,7 +23,6 @@ public class Table {
     private final DiskManager disk;
     private final Catalog catalog;
     private final int capacityPerPage;
-
     private final List<Integer> pageIds;
 
     public Table(String name, Schema schema,
@@ -45,7 +43,6 @@ public class Table {
                  Catalog catalog) {
         this(name, schema, pool, disk, catalog, Collections.emptyList());
     }
-
 
     /* ─────────────────── INSERT ─────────────────────────────────── */
     public RecordId insertTuple(long tx, TransactionManager tm, Tuple t) throws IOException {
@@ -138,6 +135,31 @@ public class Table {
         return scan(t -> true);
     }
 
+    public List<Row> scanRows(Predicate<Tuple> pred) throws IOException {
+        List<Row> out = new ArrayList<>();
+        for (int pid : pageIds) {
+            Page p = bufPool.getPage(pid);
+            ByteBuffer data = ByteBuffer.wrap(p.getData());
+            int slots = data.getInt(0);
+
+            for (int i = 0; i < slots; i++) {
+                int slotPos = Page.PAGE_SIZE - BYTES * (i + 1);
+                int off = data.getInt(slotPos);
+                int len = data.getInt(off);
+                if (len <= 0) continue;                 // tombstone
+
+                byte[] rec = new byte[len];
+                System.arraycopy(p.getData(), off + BYTES, rec, 0, len);
+                Tuple tup = Tuple.deserialize(schema, rec);
+
+                if (pred.test(tup))
+                    out.add(new Row(new RecordId(pid, off), tup));
+            }
+        }
+        return out;
+    }
+
+
     public Schema getSchema() {
         return schema;
     }
@@ -193,5 +215,8 @@ public class Table {
         data.putInt(slotPos, offset);
         data.putInt(0, slots + 1);
         return offset;
+    }
+
+    public static record Row(RecordId rid, Tuple tuple) {
     }
 }

@@ -55,7 +55,7 @@ class SQLParserTest {
 
     @Test
     void testUnsupportedSqlThrows() {
-        String sql = "UPDATE users SET name = 'Bob'";
+        String sql = "BEGIN TRANSACTION";
         Exception ex = assertThrows(IllegalArgumentException.class, () -> parser.parse(sql));
         assertTrue(ex.getMessage().contains("Unsupported SQL"));
     }
