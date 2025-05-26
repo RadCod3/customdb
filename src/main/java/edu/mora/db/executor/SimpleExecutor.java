@@ -10,7 +10,9 @@ import edu.mora.db.table.Table;
 import edu.mora.db.table.Tuple;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Optional;
 import java.util.function.Predicate;
 
@@ -125,8 +127,62 @@ public class SimpleExecutor {
     }
 
     /* ─────────────────────────── SELECT ─────────────────────────────── */
+//    private void execSelect(SelectStatement sel) throws IOException {
+//        execSelect(sel, System.out::println);
+//    }
+
     private void execSelect(SelectStatement sel) throws IOException {
-        execSelect(sel, System.out::println);
+        Table tab = catalog.getTable(sel.tableName());
+        Predicate<Tuple> pred = predicate(tab, sel.where());
+
+        // Get column names from the table schema
+        String[] columnNames = tab.getSchema().getColumnNames().toArray(new String[0]);
+
+        // Collect tuples to format output nicely
+        List<Tuple> results = new ArrayList<>();
+        for (Tuple t : tab.scan(pred)) {
+            results.add(t);
+        }
+
+        printTable(columnNames, results);
+    }
+
+    private void printTable(String[] columns, List<Tuple> rows) {
+        // Calculate max width per column for formatting
+        int[] colWidths = new int[columns.length];
+        for (int i = 0; i < columns.length; i++) {
+            colWidths[i] = columns[i].length();
+        }
+
+        // Update max width based on content
+        for (Tuple row : rows) {
+            for (int i = 0; i < columns.length; i++) {
+                String val = row.getValue(i).toString();  // assuming getValue(int colIndex)
+                colWidths[i] = Math.max(colWidths[i], val.length());
+            }
+        }
+
+        // Print header
+        StringBuilder header = new StringBuilder("|");
+        StringBuilder separator = new StringBuilder("+");
+        for (int i = 0; i < columns.length; i++) {
+            header.append(String.format(" %-" + colWidths[i] + "s |", columns[i]));
+            separator.append("-".repeat(colWidths[i] + 2)).append("+");
+        }
+        System.out.println(separator);
+        System.out.println(header);
+        System.out.println(separator);
+
+        // Print rows
+        for (Tuple row : rows) {
+            StringBuilder rowLine = new StringBuilder("|");
+            for (int i = 0; i < columns.length; i++) {
+                String val = row.getValue(i).toString();
+                rowLine.append(String.format(" %-" + colWidths[i] + "s |", val));
+            }
+            System.out.println(rowLine);
+        }
+        System.out.println(separator);
     }
 
     private void execSelect(SelectStatement sel,

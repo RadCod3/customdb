@@ -71,4 +71,11 @@ public class Tuple {
         sb.append(')');
         return sb.toString();
     }
+
+    public Object getValue(int i) {
+        if (i < 0 || i >= values.length) {
+            throw new IndexOutOfBoundsException("Index: " + i + ", Size: " + values.length);
+        }
+        return values[i];
+    }
 }

@@ -34,4 +34,8 @@ public class Schema {
     }
 
     public enum Type {INT, STRING}
+
+    public List<String> getColumnNames() {
+        return List.copyOf(columnNames);
+    }
 }
