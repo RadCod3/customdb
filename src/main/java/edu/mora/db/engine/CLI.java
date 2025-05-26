@@ -6,15 +6,14 @@ import edu.mora.db.storage.BufferPool;
 import edu.mora.db.storage.DiskManager;
 import edu.mora.db.storage.TransactionManager;
 import edu.mora.db.storage.WALManager;
+import org.jline.reader.LineReader;
+import org.jline.reader.LineReaderBuilder;
+import org.jline.reader.impl.history.DefaultHistory;
+import org.jline.terminal.Terminal;
+import org.jline.terminal.TerminalBuilder;
 
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStreamReader;
 
-/**
- * A tiny REPL that brings the whole engine up, including WAL recovery, and wraps every data-changing statement in its
- * own transaction.
- */
 public class CLI {
 
     public static void main(String[] args) throws IOException {
@@ -31,28 +30,48 @@ public class CLI {
         Catalog catalog = new Catalog(dbPath, pool);
         SimpleExecutor exec = new SimpleExecutor(catalog, txm);
 
-        /* ───── REPL loop ───────────────────────────────────────────────── */
-        BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));
-        System.out.print("MiniSQL> ");
+        /* ───── JLine Terminal with History ─────────────────────────────── */
+        Terminal terminal = TerminalBuilder.builder().system(true).build();
+        LineReader reader = LineReaderBuilder.builder()
+                .terminal(terminal)
+                .history(new DefaultHistory())
+                .build();
+
         String line;
-        while ((line = reader.readLine()) != null) {
+        while ((line = reader.readLine("MiniSQL> ")) != null) {
             if (line.equalsIgnoreCase("exit")) break;
-            if (line.trim().isEmpty()) {
-                System.out.print("MiniSQL> ");
+
+            if (line.trim().equalsIgnoreCase("clear")) {
+                clearScreen(terminal);
                 continue;
             }
+
+            if (line.trim().isEmpty()) continue;
 
             try {
                 exec.execute(line);
             } catch (Exception e) {
                 System.err.println("Error: " + e.getMessage());
             }
-            System.out.print("MiniSQL> ");
         }
 
         /* ───── clean shutdown ──────────────────────────────────────────── */
         pool.flushAll();
         wal.close();
         disk.close();
+    }
+
+    private static void clearScreen(Terminal terminal) {
+        if ("dumb".equals(terminal.getType())) {
+            // Dumb terminal fallback: print many newlines to simulate clearing
+            for (int i = 0; i < 50; i++) {
+                terminal.writer().println();
+            }
+            terminal.flush();
+        } else {
+            // Normal terminal: send ANSI clear screen codes
+            terminal.writer().print("\033[H\033[2J");
+            terminal.flush();
+        }
     }
 }

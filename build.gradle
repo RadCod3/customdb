@@ -13,6 +13,7 @@ repositories {
 dependencies {
     testImplementation platform('org.junit:junit-bom:5.10.0')
     testImplementation 'org.junit.jupiter:junit-jupiter'
+    implementation 'org.jline:jline:3.9.0'
 }
 
 test {
@@ -21,4 +22,18 @@ test {
 
 application {
     mainClass = 'edu.mora.db.engine.CLI'
+}
+
+task fatJar(type: Jar) {
+    archiveClassifier = 'all'  // output file will have -all suffix
+    from sourceSets.main.output
+
+    dependsOn configurations.runtimeClasspath
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+
+    manifest {
+        attributes 'Main-Class': 'edu.mora.db.engine.CLI'
+    }
 }
