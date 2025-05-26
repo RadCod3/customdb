@@ -3,7 +3,7 @@ package edu.mora.db.table;
 import java.nio.ByteBuffer;
 
 /**
- * A simple fixed‐length tuple: INT→4 bytes, STRING→length‐prefixed UTF‐8.
+ * A simple fixed‐length tuple: INT→4 bytes, STRING->length‐prefixed UTF‐8.
  */
 public class Tuple {
     private final Schema schema;
