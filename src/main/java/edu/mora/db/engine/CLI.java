@@ -56,8 +56,9 @@ public class CLI {
         }
 
         /* ───── clean shutdown ──────────────────────────────────────────── */
-        pool.flushAll();
-        wal.close();
+//        pool.flushAll();
+//        wal.close();
+        txm.close();
         disk.close();
     }
 
